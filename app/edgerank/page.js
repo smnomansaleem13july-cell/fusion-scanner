@@ -1,32 +1,11 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import Nav from '@/components/Nav';
+import { useScanStore } from '@/lib/scanStore';
+import { runEdge, stopEdge, setEdgeAuto, EDGE_INIT } from '@/lib/scanners';
 
-const clip = (x, a, b) => Math.max(a, Math.min(b, x));
-
-function stdev(arr) {
-  const m = arr.reduce((a, b) => a + b, 0) / arr.length;
-  return Math.sqrt(arr.reduce((s, x) => s + (x - m) * (x - m), 0) / arr.length);
-}
-function zscores(vals) {
-  const ok = vals.filter((v) => isFinite(v));
-  const m = ok.reduce((a, b) => a + b, 0) / ok.length;
-  const sd = stdev(ok) || 1e-9;
-  return vals.map((v) => (isFinite(v) ? (v - m) / sd : 0));
-}
-
-// Composite: mom z 42% + trend quality 28% + breakout 16% + squeeze 14%, RVOL boost
-function compositeScores(rows) {
-  const zMom = zscores(rows.map((r) => r.f.mom));
-  rows.forEach((r, idx) => {
-    const zm = clip(zMom[idx], -2.5, 2.5) / 2.5;
-    let score = 42 * zm + 28 * r.f.tq + 16 * clip(r.f.brk, -1, 1) + 14 * r.f.sqzFired;
-    if (r.f.rvol >= 1.5) score *= 1.08;
-    r.score = clip(score, -100, 100);
-    r.rs = Math.round((zMom.filter((z) => z <= zMom[idx]).length / zMom.length) * 100);
-  });
-}
+const fmtP = (p) => (p >= 1000 ? p.toLocaleString(undefined, { maximumFractionDigits: 1 }) : p >= 10 ? p.toFixed(2) : p >= 0.1 ? p.toFixed(4) : p.toPrecision(4));
 
 function Spark({ data, w = 92, h = 22 }) {
   if (!data || data.length < 2) return null;
@@ -40,8 +19,7 @@ function Spark({ data, w = 92, h = 22 }) {
   );
 }
 
-const fmtP = (p) => (p >= 1000 ? p.toLocaleString(undefined, { maximumFractionDigits: 1 }) : p >= 10 ? p.toFixed(2) : p >= 0.1 ? p.toFixed(4) : p.toPrecision(4));
-
+// Original HTML jaisa 7-point setup eval
 function evalSetup(r, regime) {
   const g = regime || { rgm: 'MIXED', breadth: 50 };
   const dir = r.score >= 0 ? 1 : -1;
@@ -53,83 +31,46 @@ function evalSetup(r, regime) {
     { name: 'RS extreme', pass: dir > 0 ? r.rs >= 80 : r.rs <= 20, val: 'RS ' + r.rs },
     { name: 'Trend quality', pass: Math.abs(f.tq) >= 0.5 && Math.sign(f.tq) === dir, val: 'TQ ' + (f.tq >= 0 ? '+' : '') + Math.round(f.tq * 100) },
     { name: 'Score strength', pass: Math.abs(r.score) >= 40, val: (r.score > 0 ? '+' : '') + Math.round(r.score) },
-    { name: 'Trigger', pass: trig, val: f.sqzFired !== 0 ? 'SQZ' : f.brkTxt },
-    { name: 'RVOL', pass: f.rvol >= 1.5, val: f.rvol.toFixed(1) + 'x' },
+    { name: 'Trigger (SQZ/BRK)', pass: trig, val: f.sqzFired !== 0 ? 'SQZ' : f.brkTxt },
+    { name: 'RVOL ≥ 1.5x', pass: f.rvol >= 1.5, val: f.rvol.toFixed(1) + 'x' },
   ];
   return { dir, checks, count: checks.filter((c) => c.pass).length };
 }
 
+const FILTERS = [
+  { id: 'all', label: 'All' },
+  { id: 'long', label: 'Long bias' },
+  { id: 'short', label: 'Short bias' },
+  { id: 'squeeze', label: 'Squeeze' },
+  { id: 'rvol', label: 'RVOL 1.5x+' },
+  { id: 'setup6', label: 'Setup 6+' },
+];
+
 export default function EdgeRank() {
+  const st = useScanStore('edge', EDGE_INIT);
   const [count, setCount] = useState(100);
   const [filter, setFilter] = useState('all');
-  const [rows, setRows] = useState([]);
-  const [regime, setRegime] = useState(null);
-  const [scanning, setScanning] = useState(false);
-  const [progress, setProgress] = useState('');
   const [selected, setSelected] = useState(null);
-  const stopRef = useRef(false);
 
-  async function scan() {
-    if (scanning) return;
-    stopRef.current = false;
-    setScanning(true);
-    setRows([]);
-    setSelected(null);
-    setRegime(null);
-    try {
-      setProgress('Loading top pairs...');
-      const pRes = await fetch('/api/pairs?count=' + count);
-      const pData = await pRes.json();
-      if (!pData.ok) throw new Error(pData.error || 'Pairs load failed');
-      const pairs = pData.pairs;
-      if (!pairs.some((p) => p.sym === 'BTCUSDT')) pairs.push({ sym: 'BTCUSDT', last: 0, chg: 0, qv: 0, btcOnly: true });
+  const opts = { count };
 
-      const collected = [];
-      const batchSize = 14;
-      for (let i = 0; i < pairs.length; i += batchSize) {
-        if (stopRef.current) break;
-        setProgress(`Scanning ${Math.min(i + batchSize, pairs.length)}/${pairs.length}...`);
-        const res = await fetch('/api/edgerank', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pairs: pairs.slice(i, i + batchSize) }),
-        });
-        const data = await res.json();
-        if (data.ok && data.rows) collected.push(...data.rows);
-      }
-
-      // Regime from BTC + breadth
-      const btc = collected.find((r) => r.sym === 'BTCUSDT');
-      const breadth = collected.length ? Math.round((100 * collected.filter((r) => r.f.aboveE50).length) / collected.length) : 50;
-      let rgm = 'MIXED', cls = 'rg-mix';
-      if (btc) {
-        const up = btc.f.tq > 0.15 && btc.f.aboveE50;
-        const dn = btc.f.tq < -0.15 && !btc.f.aboveE50;
-        if (up && breadth >= 60) { rgm = 'RISK-ON'; cls = 'rg-on'; }
-        else if (dn && breadth <= 40) { rgm = 'RISK-OFF'; cls = 'rg-off'; }
-      }
-      setRegime({ rgm, cls, breadth });
-
-      const ok = collected.filter((r) => !r.btcOnly);
-      compositeScores(ok);
-      ok.sort((a, b) => b.score - a.score);
-      setRows(ok);
-      setProgress(`Done — ${ok.length} coins ranked`);
-    } catch (e) {
-      setProgress('Error: ' + (e.message || 'scan failed'));
-    } finally {
-      setScanning(false);
-    }
-  }
+  // Setup counts compute (regime-dependent)
+  const withSetup = useMemo(() => {
+    return st.rows.map((r) => ({ ...r, setup: evalSetup(r, st.regime) }));
+  }, [st.rows, st.regime]);
 
   const view = useMemo(() => {
-    if (filter === 'long') return rows.filter((r) => r.score >= 0);
-    if (filter === 'short') return rows.filter((r) => r.score < 0);
-    if (filter === 'strong') return rows.filter((r) => Math.abs(r.score) >= 40);
-    return rows;
-  }, [rows, filter]);
+    let v = withSetup;
+    if (filter === 'long') v = v.filter((r) => r.score >= 0);
+    else if (filter === 'short') v = v.filter((r) => r.score < 0);
+    else if (filter === 'squeeze') v = v.filter((r) => r.f.sqzNow || r.f.sqzFired !== 0);
+    else if (filter === 'rvol') v = v.filter((r) => r.f.rvol >= 1.5);
+    else if (filter === 'setup6') v = v.filter((r) => r.setup.count >= 6);
+    return v;
+  }, [withSetup, filter]);
 
-  const ev = selected ? evalSetup(selected, regime) : null;
+  const sel = selected ? withSetup.find((r) => r.sym === selected) : null;
+  const g = st.regime;
 
   return (
     <div className="app">
@@ -143,9 +84,21 @@ export default function EdgeRank() {
         </div>
         <Nav />
         <div className="status">
-          {regime && <span className={'regime-pill ' + regime.cls}>{regime.rgm} · breadth {regime.breadth}%</span>}
+          {g && (
+            <>
+              <span className={'regime-pill ' + g.cls}>{g.rgm}</span>
+              <span className="mono">BTC TQ {(g.btcTq >= 0 ? '+' : '') + Math.round((g.btcTq || 0) * 100)}</span>
+              <span className="mono">Breadth {g.breadth}%</span>
+            </>
+          )}
         </div>
       </div>
+
+      {g && (
+        <div className="breadth-bar" title={'Breadth ' + g.breadth + '%'}>
+          <div className="breadth-fill" style={{ width: g.breadth + '%' }} />
+        </div>
+      )}
 
       <div className="controls">
         <div className="field">
@@ -158,50 +111,51 @@ export default function EdgeRank() {
             <option value={500}>Top 500</option>
           </select>
         </div>
-        <div className="field">
-          <label htmlFor="er-filter">Filter</label>
-          <select id="er-filter" value={filter} onChange={(e) => setFilter(e.target.value)}>
-            <option value="all">All</option>
-            <option value="long">Long bias</option>
-            <option value="short">Short bias</option>
-            <option value="strong">Strong (|score| ≥ 40)</option>
-          </select>
+        <div className="chips">
+          {FILTERS.map((f) => (
+            <button key={f.id} className={'chip' + (filter === f.id ? ' on' : '')} onClick={() => setFilter(f.id)}>{f.label}</button>
+          ))}
         </div>
         <div className="actions">
-          <button className="primary" onClick={scan} disabled={scanning}>{scanning ? 'Scanning…' : 'Scan'}</button>
-          <button className="danger" onClick={() => { stopRef.current = true; }} disabled={!scanning}>Stop</button>
+          <button className="primary" onClick={() => runEdge(opts)} disabled={st.scanning}>{st.scanning ? 'Scanning…' : 'Scan'}</button>
+          <button className={st.auto ? 'chip on' : 'chip'} onClick={() => setEdgeAuto(!st.auto, opts)}>Auto {count >= 250 ? '180s' : '60s'}</button>
+          <button className="danger" onClick={stopEdge} disabled={!st.scanning}>Stop</button>
         </div>
       </div>
 
-      <div className={'progress' + (progress ? ' visible' : '')}>
-        <div className="progress-text">{progress}</div>
+      <div className={'progress' + (st.progress ? ' visible' : '')}>
+        <div className="progress-text">{st.progress}</div>
       </div>
 
       <div className="main">
         <div className="table-wrap">
           {view.length === 0 ? (
             <div className="empty">
-              {scanning ? <p>Scanning…</p> : <p><b>No rankings yet.</b><br />Press <b>Scan</b> — top pairs 1h momentum, trend quality, squeeze aur breakout par rank honge.</p>}
+              {st.scanning ? <p>Scanning…</p> : <p><b>No rankings yet.</b><br />Press <b>Scan</b>. Scan background me chalta rahega — doosre tab pe jaake wapas aao to data yahi milega.</p>}
             </div>
           ) : (
             <table>
               <thead>
                 <tr>
-                  <th>#</th><th>Symbol</th><th>Score</th><th>RS</th><th>Price</th><th>24h</th><th>TQ</th><th>RVOL</th><th>Breakout</th><th>48h</th>
+                  <th>#</th><th>Pair</th><th>Score</th><th>Setup</th><th>RS</th><th>Trend Q</th><th>SQZ</th><th>RVOL</th><th>100H BRK</th><th>24h</th><th>Price</th><th>48h</th>
                 </tr>
               </thead>
               <tbody>
                 {view.map((r, i) => (
-                  <tr key={r.sym} className={selected?.sym === r.sym ? 'selected' : ''} onClick={() => setSelected(r)}>
+                  <tr key={r.sym} className={selected === r.sym ? 'selected' : ''} onClick={() => setSelected(r.sym)}>
                     <td className="mono" style={{ color: 'var(--soft)' }}>{i + 1}</td>
                     <td><b>{r.sym.replace('USDT', '')}</b></td>
                     <td className={r.score >= 0 ? 'heat-pos mono' : 'heat-neg mono'}>{r.score >= 0 ? '+' : ''}{Math.round(r.score)}</td>
+                    <td className="mono" style={{ fontWeight: 800, color: r.setup.count >= 6 ? 'var(--cyan)' : r.setup.count >= 4 ? 'var(--green)' : 'var(--muted)' }}>{r.setup.count}/7</td>
                     <td className="mono">{r.rs}</td>
-                    <td className="mono">${fmtP(r.f.close)}</td>
-                    <td className={'mono ' + (r.chg >= 0 ? 'chg-pos' : 'chg-neg')}>{r.chg >= 0 ? '+' : ''}{r.chg.toFixed(2)}%</td>
                     <td className="mono" style={{ color: r.f.tq >= 0 ? 'var(--green)' : 'var(--red)' }}>{(r.f.tq >= 0 ? '+' : '') + Math.round(r.f.tq * 100)}</td>
+                    <td className="mono" style={{ fontSize: 11, color: r.f.sqzFired > 0 ? 'var(--green)' : r.f.sqzFired < 0 ? 'var(--red)' : r.f.sqzNow ? 'var(--amber)' : 'var(--soft)' }}>
+                      {r.f.sqzNow ? '●ON' : r.f.sqzFired > 0 ? 'FIRED↑' : r.f.sqzFired < 0 ? 'FIRED↓' : '—'}
+                    </td>
                     <td className="mono">{r.f.rvol.toFixed(1)}x</td>
-                    <td className="mono" style={{ fontSize: 11 }}>{r.f.sqzNow ? 'SQZ·on' : r.f.sqzFired !== 0 ? 'SQZ→' + (r.f.sqzFired > 0 ? 'up' : 'dn') : r.f.brkTxt}</td>
+                    <td className="mono" style={{ fontSize: 11 }}>{r.f.brkTxt}</td>
+                    <td className={'mono ' + (r.chg >= 0 ? 'chg-pos' : 'chg-neg')}>{r.chg >= 0 ? '+' : ''}{r.chg.toFixed(1)}%</td>
+                    <td className="mono">${fmtP(r.f.close)}</td>
                     <td><Spark data={r.f.spark} /></td>
                   </tr>
                 ))}
@@ -210,37 +164,37 @@ export default function EdgeRank() {
           )}
         </div>
 
-        {selected && ev && (
+        {sel && (
           <aside className="side">
             <div className="side-head">
               <div>
-                <h2>{selected.sym.replace('USDT', '')} <span className={'pill ' + (ev.dir > 0 ? 'long' : 'short')}>{ev.dir > 0 ? 'LONG' : 'SHORT'}</span></h2>
-                <div className="sub">Score {(selected.score > 0 ? '+' : '') + Math.round(selected.score)} · RS {selected.rs}</div>
+                <h2>{sel.sym.replace('USDT', '')} <span className={'pill ' + (sel.setup.dir > 0 ? 'long' : 'short')}>{sel.setup.dir > 0 ? 'LONG' : 'SHORT'}</span></h2>
+                <div className="sub">Score {(sel.score > 0 ? '+' : '') + Math.round(sel.score)} · RS {sel.rs} · Setup {sel.setup.count}/7</div>
               </div>
               <button className="ghost" onClick={() => setSelected(null)} aria-label="Close details">✕</button>
             </div>
             <div className="side-body">
               <div className="panel">
-                <h3>Pre-trade checklist — {ev.count}/7</h3>
-                {ev.checks.map((c) => (
+                <h3>Pre-trade checklist — {sel.setup.count}/7</h3>
+                {sel.setup.checks.map((c) => (
                   <div className="kv" key={c.name}>
-                    <span className="k">{c.pass ? '✓ ' : '✗ '}{c.name}</span>
-                    <span className="v" style={{ color: c.pass ? 'var(--green)' : 'var(--soft)' }}>{c.val}</span>
+                    <span className="k" style={{ color: c.pass ? 'var(--green)' : 'var(--soft)' }}>{c.pass ? '✓ ' : '✗ '}{c.name}</span>
+                    <span className="v">{c.val}</span>
                   </div>
                 ))}
                 <div className="kv" style={{ marginTop: 8, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
                   <span className="k">Verdict</span>
-                  <span className="v" style={{ color: ev.count === 7 ? 'var(--green)' : 'var(--amber)' }}>{ev.count === 7 ? 'GO ✓' : 'SETUP ' + ev.count + '/7'}</span>
+                  <span className="v" style={{ color: sel.setup.count === 7 ? 'var(--green)' : 'var(--amber)' }}>{sel.setup.count === 7 ? 'GO ✓' : 'SETUP ' + sel.setup.count + '/7'}</span>
                 </div>
               </div>
               <div className="panel">
                 <h3>Factors</h3>
-                <div className="kv"><span className="k">Momentum (risk-adj)</span><span className="v">{selected.f.mom.toFixed(2)}</span></div>
-                <div className="kv"><span className="k">Trend quality</span><span className="v">{(selected.f.tq >= 0 ? '+' : '') + Math.round(selected.f.tq * 100)}</span></div>
-                <div className="kv"><span className="k">Squeeze</span><span className="v">{selected.f.sqzNow ? 'Active' : selected.f.sqzFired !== 0 ? 'Fired ' + (selected.f.sqzFired > 0 ? 'up' : 'down') : '--'}</span></div>
-                <div className="kv"><span className="k">Breakout</span><span className="v">{selected.f.brkTxt}</span></div>
-                <div className="kv"><span className="k">RVOL</span><span className="v">{selected.f.rvol.toFixed(2)}x</span></div>
-                <div className="kv"><span className="k">Above EMA50</span><span className="v">{selected.f.aboveE50 ? 'Yes' : 'No'}</span></div>
+                <div className="kv"><span className="k">Momentum (risk-adj)</span><span className="v">{sel.f.mom.toFixed(2)}</span></div>
+                <div className="kv"><span className="k">Trend quality</span><span className="v">{(sel.f.tq >= 0 ? '+' : '') + Math.round(sel.f.tq * 100)}</span></div>
+                <div className="kv"><span className="k">Squeeze</span><span className="v">{sel.f.sqzNow ? 'Active' : sel.f.sqzFired !== 0 ? 'Fired ' + (sel.f.sqzFired > 0 ? 'up' : 'down') : '--'}</span></div>
+                <div className="kv"><span className="k">Breakout</span><span className="v">{sel.f.brkTxt}</span></div>
+                <div className="kv"><span className="k">RVOL</span><span className="v">{sel.f.rvol.toFixed(2)}x</span></div>
+                <div className="kv"><span className="k">Above EMA50</span><span className="v">{sel.f.aboveE50 ? 'Yes' : 'No'}</span></div>
               </div>
             </div>
           </aside>

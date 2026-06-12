@@ -1,7 +1,9 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import Nav from '@/components/Nav';
+import { useScanStore } from '@/lib/scanStore';
+import { runTurtle, stopTurtle, TURTLE_INIT } from '@/lib/scanners';
 
 const CHECK_LABELS = ['Swing', 'Sweep', 'MSS', 'FVG', 'Retest'];
 
@@ -24,53 +26,9 @@ export default function TurtleSoup() {
   const [tf, setTf] = useState('15m');
   const [minScore, setMinScore] = useState(3);
   const [dirFilter, setDirFilter] = useState('all');
-  const [rows, setRows] = useState([]);
-  const [scanning, setScanning] = useState(false);
-  const [progress, setProgress] = useState({ pct: 0, text: '' });
-  const [scanned, setScanned] = useState(0);
-  const [total, setTotal] = useState(0);
-  const stopRef = useRef(false);
+  const st = useScanStore('turtle', TURTLE_INIT);
+  const { rows, scanning, progress, scanned, total } = st;
 
-  async function scan() {
-    if (scanning) return;
-    stopRef.current = false;
-    setScanning(true);
-    setRows([]);
-    setScanned(0);
-    setTotal(0);
-    try {
-      setProgress({ pct: 2, text: 'Loading market-cap universe (server cached)...' });
-      const uRes = await fetch('/api/universe?count=' + coinCount);
-      const uData = await uRes.json();
-      if (!uData.ok || !uData.coins?.length) throw new Error(uData.error || 'Universe load failed');
-      const coins = uData.coins;
-      setTotal(coins.length);
-
-      const batchSize = 10;
-      let done = 0;
-      for (let i = 0; i < coins.length; i += batchSize) {
-        if (stopRef.current) break;
-        const batch = coins.slice(i, i + batchSize);
-        setProgress({ pct: (i / coins.length) * 100, text: 'Scanning ' + batch.map((c) => c.base).join(', ') });
-        try {
-          const res = await fetch('/api/turtle', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ coins: batch, tf }),
-          });
-          const data = await res.json();
-          if (data.ok && data.rows?.length) setRows((prev) => [...prev, ...data.rows]);
-        } catch (e) { /* batch fail — continue */ }
-        done += batch.length;
-        setScanned(done);
-      }
-      setProgress({ pct: 100, text: stopRef.current ? 'Stopped' : 'Scan complete' });
-    } catch (e) {
-      setProgress({ pct: 0, text: 'Error: ' + (e.message || 'scan failed') });
-    } finally {
-      setScanning(false);
-    }
-  }
 
   const view = useMemo(() => {
     let v = rows.filter((r) => r.score >= minScore);
@@ -140,8 +98,8 @@ export default function TurtleSoup() {
           </select>
         </div>
         <div className="actions">
-          <button className="primary" onClick={scan} disabled={scanning}>{scanning ? 'Scanning…' : 'Start scan'}</button>
-          <button className="danger" onClick={() => { stopRef.current = true; }} disabled={!scanning}>Stop</button>
+          <button className="primary" onClick={() => runTurtle({ coinCount, tf })} disabled={scanning}>{scanning ? 'Scanning…' : 'Start scan'}</button>
+          <button className="danger" onClick={stopTurtle} disabled={!scanning}>Stop</button>
         </div>
       </div>
 

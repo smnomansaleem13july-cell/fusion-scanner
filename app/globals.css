@@ -243,3 +243,18 @@ tbody tr.selected { background: rgba(40,180,216,.09); }
 }
 .ck-dot.on { background: rgba(22,199,132,.16); color: var(--green); border-color: rgba(22,199,132,.45); }
 .loc-pill { font-size: 10.5px; padding: 2px 8px; border-radius: 4px; background: var(--panel-3); color: var(--muted); }
+
+/* ── Filter chips + breadth bar ── */
+.chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: end; padding-bottom: 1px; }
+.chip {
+  padding: 6px 12px;
+  border-radius: 99px;
+  font-size: 11.5px;
+  font-weight: 700;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.chip.on { background: rgba(40,180,216,.14); border-color: var(--cyan); color: var(--cyan); }
+.breadth-bar { height: 4px; background: var(--panel-3); }
+.breadth-fill { height: 100%; background: linear-gradient(90deg, #f05267, #eab84d, #16c784); transition: width .4s; }

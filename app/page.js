@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Nav from '@/components/Nav';
+import { useScanStore } from '@/lib/scanStore';
+import { runFusion, stopFusion, FUSION_INIT } from '@/lib/scanners';
 
 const COLORS = { long: '#16c784', short: '#f05267', watch: '#eab84d', neutral: '#9ca6b6', cyan: '#28b4d8', violet: '#9b7cf6', orange: '#f59e4b' };
 
@@ -41,13 +43,9 @@ export default function Scanner() {
   const [liq, setLiq] = useState(true);
   const [search, setSearch] = useState('');
 
-  const [rows, setRows] = useState([]);
-  const [scanning, setScanning] = useState(false);
-  const [progress, setProgress] = useState({ pct: 0, text: '' });
-  const [scanned, setScanned] = useState(0);
-  const [total, setTotal] = useState(0);
+  const st = useScanStore('fusion', FUSION_INIT);
+  const { rows, scanning, progress, scanned, total, api } = st;
   const [selected, setSelected] = useState(null);
-  const [api, setApi] = useState({ text: 'Idle', kind: 'ok' });
   const [clock, setClock] = useState('');
   const [session, setSession] = useState('');
   const [toast, setToast] = useState('');
@@ -72,69 +70,11 @@ export default function Scanner() {
     toastT.current = setTimeout(() => setToast(''), 4200);
   };
 
-  async function startScan() {
-    if (scanning) return;
-    stopRef.current = false;
-    setScanning(true);
-    setRows([]);
-    setSelected(null);
-    setScanned(0);
-    setTotal(0);
-    setApi({ text: 'Loading APIs', kind: 'warn' });
-    setProgress({ pct: 0, text: 'Loading market-cap universe (server cached)' });
-
-    try {
-      const uRes = await fetch('/api/universe?count=' + coinCount);
-      const uData = await uRes.json();
-      if (!uData.ok || !uData.coins?.length) throw new Error(uData.error || 'No tradable coins found');
-      const coins = uData.coins;
-      setTotal(coins.length);
-      setApi({ text: uData.cgOk ? 'APIs live' : 'CG fallback (volume)', kind: uData.cgOk ? 'ok' : 'warn' });
-
-      const batchSize = 8;
-      let done = 0;
-      for (let i = 0; i < coins.length; i += batchSize) {
-        if (stopRef.current) break;
-        const batch = coins.slice(i, i + batchSize);
-        setProgress({ pct: (i / coins.length) * 100, text: 'Scanning ' + batch.map((c) => c.base).join(', ') });
-        try {
-          const res = await fetch('/api/scan', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ coins: batch, tf, mtf, liq, minScore, dirFilter }),
-          });
-          const data = await res.json();
-          done += batch.length;
-          setScanned(done);
-          if (data.ok && data.rows?.length) {
-            setRows((prev) => [...prev, ...data.rows]);
-          }
-        } catch (e) {
-          done += batch.length;
-          setScanned(done);
-        }
-      }
-      setProgress({ pct: 100, text: stopRef.current ? 'Stopped' : 'Scan complete' });
-      showToast(stopRef.current ? 'Scan stopped' : 'Scan complete');
-    } catch (e) {
-      setApi({ text: 'API error', kind: 'bad' });
-      showToast(e.message || 'Scan failed');
-    } finally {
-      setScanning(false);
-    }
-  }
-
-  function stopScan() {
-    stopRef.current = true;
-  }
-
   function clearAll() {
-    setRows([]);
-    setSelected(null);
-    setScanned(0);
-    setTotal(0);
-    setProgress({ pct: 0, text: '' });
+    // store reset
+    stopFusion();
   }
+
 
   const view = useMemo(() => {
     let v = [...rows];
@@ -253,8 +193,8 @@ export default function Scanner() {
           <label><input type="checkbox" checked={liq} onChange={(e) => setLiq(e.target.checked)} /> Liquidity required</label>
         </div>
         <div className="actions">
-          <button className="primary" onClick={startScan} disabled={scanning}>{scanning ? 'Scanning…' : 'Start scan'}</button>
-          <button className="danger" onClick={stopScan} disabled={!scanning}>Stop</button>
+          <button className="primary" onClick={() => { setSelected(null); runFusion({ coinCount, tf, mtf, liq, minScore, dirFilter }); }} disabled={scanning}>{scanning ? 'Scanning…' : 'Start scan'}</button>
+          <button className="danger" onClick={stopFusion} disabled={!scanning}>Stop</button>
           <button className="ghost" onClick={exportCSV}>Export CSV</button>
           <button className="ghost" onClick={clearAll}>Clear</button>
         </div>
