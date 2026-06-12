@@ -206,3 +206,40 @@ tbody tr.selected { background: rgba(40,180,216,.09); }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* ── Tool navigation ── */
+.toolnav { display: flex; gap: 6px; align-items: center; }
+.toolnav-link {
+  padding: 6px 13px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 12px;
+  font-weight: 700;
+  transition: all .15s;
+}
+.toolnav-link:hover { border-color: var(--cyan); color: var(--text); }
+.toolnav-link.active { background: rgba(40,180,216,.12); border-color: var(--cyan); color: var(--cyan); }
+
+/* ── EdgeRank extras ── */
+.heat-pos { color: var(--green); font-weight: 800; }
+.heat-neg { color: var(--red); font-weight: 800; }
+.regime-pill { padding: 3px 11px; border-radius: 99px; font-size: 11px; font-weight: 800; border: 1px solid; }
+.rg-on { color: var(--green); border-color: rgba(22,199,132,.45); background: rgba(22,199,132,.1); }
+.rg-off { color: var(--red); border-color: rgba(240,82,103,.45); background: rgba(240,82,103,.1); }
+.rg-mix { color: var(--amber); border-color: rgba(234,184,77,.45); background: rgba(234,184,77,.08); }
+.spark { display: block; }
+
+/* ── Turtle checklist dots ── */
+.ck-dots { display: flex; gap: 4px; }
+.ck-dot {
+  width: 18px; height: 18px;
+  border-radius: 4px;
+  display: grid; place-items: center;
+  font-size: 9.5px; font-weight: 800;
+  background: var(--panel-3); color: var(--soft);
+  border: 1px solid var(--line);
+}
+.ck-dot.on { background: rgba(22,199,132,.16); color: var(--green); border-color: rgba(22,199,132,.45); }
+.loc-pill { font-size: 10.5px; padding: 2px 8px; border-radius: 4px; background: var(--panel-3); color: var(--muted); }

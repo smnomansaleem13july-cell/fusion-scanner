@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import Nav from '@/components/Nav';
 
 const COLORS = { long: '#16c784', short: '#f05267', watch: '#eab84d', neutral: '#9ca6b6', cyan: '#28b4d8', violet: '#9b7cf6', orange: '#f59e4b' };
 
@@ -187,6 +188,7 @@ export default function Scanner() {
             <div className="sub">EMA + Momentum + ICT/SMC + Turtle + Flow + Risk</div>
           </div>
         </div>
+        <Nav />
         <div className="status">
           <span><span className={'dot ' + api.kind}></span>{api.text}</span>
           <span className="mono">{session}</span>
